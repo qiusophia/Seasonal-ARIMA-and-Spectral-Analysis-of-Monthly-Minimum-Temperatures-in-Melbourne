@@ -1,0 +1,209 @@
+---
+title: "Seasonal ARIMA and Spectral Analysis of Monthly Minimum Temperatures in Melbourne"
+author: "Sophia Qiu (xianglang@ucsb.edu)"
+date: "`r Sys.Date()`"
+output: pdf_document
+abstract: |
+  This project models the monthly average minimum temperature in Melbourne, Australia over the decade from 1981 to 1990. Starting from the daily record collected by the Australian Bureau of Meteorology, I aggregate the readings into 120 monthly values and study the resulting series with the Box-Jenkins method. After a regular and a seasonal difference, the autocorrelation pattern points to a SARIMA(0,1,1)(1,1,1)[12] model, which passes the usual residual checks and produces a sensible 12 month forecast for 1991. I then bring in spectral analysis as a second, independent method. The periodogram places almost all of the series' energy at one cycle per year, which confirms the 12 month season I found from the ACF and PACF, and the residual spectrum is flat at the seasonal frequencies, which tells me the model has absorbed that structure. The two methods agree, and together they make a strong case that the fitted model is a good description of the data.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.height = 5, fig.width = 8, fig.align = "center")
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+```
+
+```{r load-data, include=FALSE}
+df <- read_csv("C:/Users/qiuso/OneDrive/274/daily-minimum-temperatures-in-me.csv",
+               col_names = c("Date", "Temp"), skip = 1) %>%
+  mutate(Temp = as.numeric(str_replace_all(Temp, "\\?", "")),
+         Date = ymd(Date)) %>%
+  drop_na()
+
+monthly_temp <- df %>%
+  mutate(YearMonth = floor_date(Date, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(Mean_Temp = mean(Temp, na.rm = TRUE))
+
+temp_ts <- ts(monthly_temp$Mean_Temp, start = c(1981, 1), frequency = 12)
+```
+
+# 1. Introduction
+
+Temperature is one of the cleanest examples of a seasonal time series, which is exactly why it makes a good teaching case for the methods in this course. I wanted a series with an obvious yearly rhythm but no strong trend, so that the seasonal machinery of SARIMA would do most of the work and I could see clearly whether the model was capturing the right structure. The Melbourne minimum temperature record fits that description well. It swings up and down every year with the southern hemisphere seasons, and over ten years it shows no real drift, which keeps the focus on the seasonal behavior.
+
+The purpose of the project is twofold. First, I want to walk the full Box-Jenkins path from a raw series to a forecast, making each modeling choice on the basis of what the data shows rather than guessing. Second, I want to check that conclusion with a method from a different part of the course. Spectral analysis is a natural partner here because it looks at the same data from the frequency side instead of the time side. If both approaches agree that the dominant period is twelve months, that agreement is far more convincing than either one alone.
+
+This dataset has been studied many times, which is part of its appeal as a benchmark. People have fit ARMA models to the daily series, built machine learning forecasters on it, and used it to demonstrate decomposition and smoothing. Most of that earlier work reaches the same broad conclusion, namely that the series is strongly seasonal with little trend. My contribution is not to find something new about Melbourne weather but to apply the Box-Jenkins workflow carefully and then confirm it with spectral analysis, which is the part most of those earlier treatments leave out.
+
+The methods I apply are a seasonal ARIMA model fitted through identification, estimation, and diagnostics, followed by spectral analysis of both the raw series and the model residuals. The headline finding is simple and consistent across both methods. The series is driven almost entirely by a single annual cycle, a SARIMA(0,1,1)(1,1,1)[12] model captures that cycle and leaves white noise behind, and the model forecasts a clean seasonal curve for 1991 with prediction intervals that widen sensibly as the horizon grows.
+
+# 2. Data
+
+The series comes from the daily minimum temperature record for Melbourne, Australia, covering the ten years from 1981 to 1990. The original file holds 3650 daily observations measured in degrees Celsius. The data was collected by the Australian Bureau of Meteorology, the national weather agency, using standard ground station instruments that record the lowest temperature reached each day. It was later compiled into Rob Hyndman's Time Series Data Library and has since been mirrored widely, which is how it has become a common benchmark for teaching and testing time series methods.
+
+For this project I do not work with the daily values directly. Daily minimum temperatures are noisy from one day to the next, and that short term noise hides the seasonal signal I care about. To bring the seasonal pattern forward, I average the daily readings within each calendar month, which turns the 3650 daily points into 120 monthly values running from January 1981 to December 1990. The monthly series keeps a frequency of twelve observations per year and is the object I model for the rest of the report.
+
+I chose this dataset for a few reasons. It is long enough to estimate a seasonal model with confidence, since ten full years give ten repetitions of the annual cycle. It has a clear and stable season with no competing trend, which keeps the modeling honest and interpretable. And because so many others have used it, my results can be sanity checked against a large body of prior work. The dataset matters beyond the classroom too, since records like this are the raw material for studying climate variability and for validating the forecasting tools that meteorological agencies rely on.
+
+The data is publicly available. The version I used can be found on Kaggle, *Daily Minimum Temperatures in Melbourne* (https://www.kaggle.com/datasets/paulbrabban/daily-minimum-temperatures-in-melbourne). The original source is the Australian Bureau of Meteorology (https://www.bom.gov.au).
+
+# 3. Methodology
+
+## 3.1 SARIMA(p, d, q)(P, D, Q)[s] model
+
+A seasonal ARIMA model extends the ordinary ARIMA family with a second set of terms that act at the seasonal lag. The non-seasonal part uses p autoregressive terms, d differences, and q moving average terms. The seasonal part mirrors this with P, D, and Q terms that operate at multiples of the season length s, which is twelve here because the data is monthly. Differencing, both regular and seasonal, removes trend and seasonal level so that the remaining series is stationary, and the AR and MA terms then describe the leftover autocorrelation.
+
+I follow the Box-Jenkins method, which moves through three stages. In identification I plot the series, test for stationarity, difference as needed, and read the orders off the autocorrelation and partial autocorrelation functions. In estimation I fit the candidate model by maximum likelihood and check that its coefficients are meaningful. In diagnostics I examine the residuals to confirm they behave like white noise, since a good model should leave nothing structured behind. As a cross check I also let the automatic selection routine search the model space and compare its choice to mine.
+
+## 3.2 Spectral analysis
+
+Spectral analysis looks at a time series in terms of frequency rather than time. Any stationary series can be thought of as a sum of cycles of different lengths, and the spectrum tells us how much of the series' variance sits at each frequency. A series with a strong yearly cycle will show a tall peak at the frequency that corresponds to one cycle per year, and a series that is pure noise will show a flat spectrum with no peaks.
+
+I estimate the spectrum with the periodogram, which is the basic frequency tool, and then smooth it with a modified Daniell window because the raw periodogram is very noisy for a short series. I do this twice. First on the raw temperature series, where I expect to see the annual peak, and again on the SARIMA residuals, where I hope to see nothing. The second check is the important one, because a flat residual spectrum at the seasonal frequencies is direct evidence that the model has done its job.
+
+# 4. Results
+
+## 4.1 Results from SARIMA(0,1,1)(1,1,1)[12]
+
+The raw series shows exactly what I expected, a smooth annual wave that rises and falls every twelve months with no long term drift (Figure 1).
+
+```{r raw-plot, fig.cap="Monthly average minimum temperatures in Melbourne, 1981 to 1990."}
+autoplot(temp_ts) +
+  ggtitle("Monthly Average Minimum Temperatures in Melbourne (1981 to 1990)") +
+  ylab("Temperature (°C)") + xlab("Year") +
+  theme_minimal()
+```
+
+The Augmented Dickey-Fuller test on the raw series rejects the unit root null with a p value of 0.01, so the series is stationary in the ordinary sense. That test does not look for a seasonal unit root, though, and the obvious yearly cycle still calls for a seasonal difference.
+
+```{r adf-raw}
+adf.test(temp_ts)
+```
+
+I therefore take a seasonal difference and one regular difference, after which the series is stationary and centered on zero (Figure 2).
+
+```{r diff-plot, fig.height=6, fig.cap="Regular plus seasonal differenced series with its ACF and PACF."}
+temp_ts %>% diff(lag = 1) %>% diff(lag = 12) %>%
+  ggtsdisplay(main = "Regular + Seasonal Differenced Series (d=1, D=1, s=12)")
+```
+
+```{r adf-diff}
+adf.test(diff(diff(temp_ts, lag = 1), lag = 12))
+```
+
+The ADF test on the differenced series gives a p value below 0.05, confirming stationarity. Reading the autocorrelation and partial autocorrelation functions then guides the model orders. At the short lags the autocorrelation cuts off after lag one while the partial autocorrelation tails off, the classic signature of a non seasonal moving average term, so q is one. At the seasonal lag there is a single spike at twelve, which points to a seasonal moving average term, so Q is one, and I add a seasonal autoregressive term to test as well. That gives the candidate SARIMA(0,1,1)(1,1,1)[12].
+
+```{r fit-model}
+fit_manual <- Arima(temp_ts, order = c(0, 1, 1), seasonal = c(1, 1, 1))
+summary(fit_manual)
+```
+
+Estimating the model returns a strong non seasonal moving average coefficient near negative 0.78 and a strong seasonal moving average coefficient near negative 0.82, both clearly significant. The seasonal autoregressive coefficient comes out near 0.02 with a large standard error, so it is not significant and the seasonal part could fairly be reduced to a single moving average term. As a check I ran the automatic selection.
+
+```{r auto-arima}
+fit_auto <- auto.arima(temp_ts, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+summary(fit_auto)
+```
+
+The automatic routine preferred ARIMA(2,0,0)(0,1,1)[12] with a slightly lower AIC of 324.74 against 329.56. The two models are close in fit, and I kept the manually identified model because it follows directly from the autocorrelation reading and passes every diagnostic, while noting honestly that the simpler seasonal specification is also defensible.
+
+The diagnostics support the model (Figure 3). The residual autocorrelation function has no spikes outside the confidence bands, the histogram of residuals looks roughly normal, and the Ljung-Box test returns a p value of 0.35, well above the usual threshold, so there is no evidence of leftover autocorrelation.
+
+```{r diagnostics, fig.height=6, fig.cap="Residual diagnostics for the fitted SARIMA model."}
+checkresiduals(fit_manual)
+```
+
+```{r ljung-box}
+Box.test(residuals(fit_manual),
+         type  = "Ljung-Box",
+         lag   = 24,
+         fitdf = sum(fit_manual$arma[c(1, 2, 3, 4)]))
+```
+
+In short the residuals behave like white noise, which is what a well specified model should produce. With the model in hand I forecast the twelve months of 1991 (Figure 4).
+
+```{r forecast}
+forecast_12 <- forecast(fit_manual, h = 12)
+print(forecast_12)
+```
+
+```{r forecast-plot, fig.cap="Twelve month forecast of Melbourne monthly average minimum temperatures for 1991."}
+autoplot(forecast_12) +
+  ggtitle("12-Month Forecast: Melbourne Monthly Average Minimum Temperatures") +
+  xlab("Year") + ylab("Temperature (°C)") +
+  theme_minimal()
+```
+
+The forecast traces a full seasonal cycle, with the summer months of January and February near 15 to 16 degrees and the winter months of June and July dipping toward 7 to 8 degrees. This matches the pattern seen throughout the decade, keeping in mind that Melbourne sits in the southern hemisphere so January is summer. The prediction intervals widen further into the horizon, which is the expected reflection of growing uncertainty.
+
+## 4.2 Results from spectral analysis
+
+The periodogram of the raw series tells the same story from the frequency side (Figure 5). Because the series is monthly with twelve observations per year, the frequency axis is measured in cycles per year, so the annual cycle should appear at a frequency of one.
+
+```{r periodogram-raw, fig.cap="Raw periodogram of the monthly series. The annual cycle dominates at one cycle per year."}
+spec_raw <- spec.pgram(temp_ts, taper = 0, log = "no",
+                       main = "Raw Periodogram of Monthly Melbourne Temperatures")
+abline(v = 1, col = "red",  lty = 2)
+abline(v = 2, col = "blue", lty = 2)
+legend("topright",
+       legend = c("Annual (1 cycle/yr)", "Semi-annual (2 cycles/yr)"),
+       col = c("red", "blue"), lty = 2, cex = 0.8)
+```
+
+```{r dominant-freq}
+top2 <- order(spec_raw$spec, decreasing = TRUE)[1:2]
+cat("Top dominant frequencies (cycles/year):", round(spec_raw$freq[top2], 4), "\n")
+cat("Corresponding periods (months):         ", round(12 / spec_raw$freq[top2], 2), "\n")
+```
+
+That is exactly where the spectrum spikes, towering over everything else, and the dominant period works out to twelve months. A much smaller bump sits at two cycles per year, the six month harmonic, which appears simply because the yearly temperature curve is not a perfect sine wave. Smoothing the periodogram with a Daniell window sharpens the annual peak and flattens everything around it, which confirms that a single yearly cycle drives the series and justifies the choice of s equal to twelve (Figure 6).
+
+```{r smoothed-spectrum, fig.cap="Smoothed spectral density of the monthly series."}
+spec_smooth <- spec.pgram(temp_ts, spans = c(3, 5), taper = 0.1, log = "no",
+                          main = "Smoothed Spectral Density of Monthly Melbourne Temperatures")
+abline(v = 1, col = "red",  lty = 2)
+abline(v = 2, col = "blue", lty = 2)
+legend("topright",
+       legend = c("Annual (1 cycle/yr)", "Semi-annual (2 cycles/yr)"),
+       col = c("red", "blue"), lty = 2, cex = 0.8)
+```
+
+The residual spectrum is the real test, and it passes (Figure 7).
+
+```{r residual-spectrum, fig.cap="Smoothed spectral density of the SARIMA residuals. No peak remains at the seasonal frequencies."}
+spec.pgram(residuals(fit_manual), spans = c(3, 5), taper = 0.1, log = "no",
+           main = "Smoothed Spectral Density of SARIMA(0,1,1)(1,1,1)[12] Residuals")
+abline(v = 1, col = "red", lty = 2)
+legend("topright", legend = "Annual frequency (1 cycle/yr)", col = "red", lty = 2, cex = 0.8)
+```
+
+After fitting the model, the spectrum of the residuals is essentially flat at one and two cycles per year, with no seasonal peak left, which says the SARIMA model has absorbed the annual structure. There is a small bump near five cycles per year, but with only 120 observations the periodogram is naturally noisy, and an isolated spike at an odd, non seasonal frequency is the kind of sampling wobble one expects rather than a real signal. This agrees with the Ljung-Box result from the time domain, which also found no meaningful autocorrelation in the residuals.
+
+# 5. Conclusion and Future Study
+
+The project set out to model Melbourne's monthly minimum temperature and to confirm that model with a second, independent method, and both goals are met. The Box-Jenkins workflow leads naturally to a SARIMA(0,1,1)(1,1,1)[12] model that fits well, leaves white noise residuals, and forecasts a believable seasonal cycle for 1991. Spectral analysis reaches the same conclusion by a different route, placing the dominant period squarely at twelve months and showing a clean residual spectrum once the seasonal structure is removed. The most important discovery is how completely a single annual cycle explains this series, so much so that no other periodicity carries meaningful weight and no extra seasonal terms are needed.
+
+There are a few natural directions for future work. The seasonal autoregressive term turned out to be unnecessary, so a careful comparison of the simpler SARIMA(0,1,1)(0,1,1)[12] and the automatic ARIMA(2,0,0)(0,1,1)[12] on held out data would settle which to prefer for forecasting. It would also be worth modeling the daily series directly rather than the monthly averages, which would bring in higher frequency behavior that monthly aggregation hides. Finally, since the original record runs only to 1990, extending the analysis with more recent Bureau of Meteorology data would allow a look at whether the seasonal pattern has shifted over the decades, which connects this small forecasting exercise to the larger question of climate change.
+
+# References
+
+Australian Bureau of Meteorology. Climate data and temperature records. https://www.bom.gov.au
+
+Brabban, P. Daily Minimum Temperatures in Melbourne (Kaggle dataset). https://www.kaggle.com/datasets/paulbrabban/daily-minimum-temperatures-in-melbourne
+
+Box, G. E. P., Jenkins, G. M., Reinsel, G. C., and Ljung, G. M. *Time Series Analysis: Forecasting and Control.*
+
+Shumway, R. H., and Stoffer, D. S. *Time Series Analysis and Its Applications.*
+
+Hyndman, R. J. Time Series Data Library.
+
+# Appendix: R Code
+
+The full code used to load the data, fit and check the SARIMA model, produce the forecast, and run the spectral analysis is reproduced below.
+
+```{r appendix-code, ref.label = setdiff(knitr::all_labels(), "appendix-code"), echo = TRUE, eval = FALSE}
+```
